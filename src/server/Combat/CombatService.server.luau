@@ -239,7 +239,12 @@ local function runMove(char: Model, move)
 		for _, target in Hitbox.Query(char, move.Hitbox) do
 			if not hitSet[target] then
 				hitSet[target] = true
-				landed = ApplyHit(char, target, move) ~= nil or landed
+				-- a failing hit must not kill this thread, or the attacker stays stuck in Attacking forever
+				local ok, result = pcall(ApplyHit, char, target, move)
+				if not ok then
+					warn("[Combat] ApplyHit failed:", result)
+				end
+				landed = (ok and result ~= nil) or landed
 			end
 		end
 		RunService.Heartbeat:Wait()
