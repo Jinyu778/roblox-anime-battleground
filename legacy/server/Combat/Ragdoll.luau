@@ -22,8 +22,11 @@ function Ragdoll.Start(char: Model)
 		local part1 = if isMotor then joint.Part1 else joint.Attachment1 and joint.Attachment1.Parent
 		-- the root joint stays so the body keeps following the HumanoidRootPart
 		if part0 and part1 and part0:IsA("BasePart") and part1:IsA("BasePart") and part0 ~= root and part1 ~= root then
-			local a0, a1 = joint.Attachment0, joint.Attachment1
-			if isMotor then
+			-- Motor6D has no Attachment0/1 properties; reading them throws, so only AnimationConstraints reuse theirs
+			local a0, a1
+			if not isMotor then
+				a0, a1 = joint.Attachment0, joint.Attachment1
+			else
 				a0 = Instance.new("Attachment")
 				a0.CFrame = joint.C0
 				a0.Parent = part0

@@ -47,6 +47,16 @@ function StateMachine.Get(char: Model)
 		WallTarget = nil,
 		WallUntil = 0,
 		WallReady = 0,
+		JumpAt = -math.huge, -- last time the humanoid entered Jumping (uppercut input)
+		UppercutReady = 0,
+		DownslamReady = 0,
+		DashDirection = nil, -- direction of the current/last dash (M1 can cancel a side dash)
+		LastJabAt = -math.huge, -- last landed dash jab (mini uppercut follow-up)
+		LastJabStunAt = -math.huge, -- last time this character was jab-stunned (anti stun-lock)
+		JabStunned = false, -- the current stun came from a jab
+		NoCancel = false, -- current ragdoll can't be dash-cancelled (true downslam)
+		GotUpAt = -math.huge, -- last ragdoll recovery (upside-down tech)
+		DashCancelToken = nil, -- this swing's endlag may be cancelled by a front dash
 	}
 	data[char] = d
 	hum.UseJumpPower = false

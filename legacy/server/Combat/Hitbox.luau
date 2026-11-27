@@ -16,8 +16,9 @@ local function sameTeam(a: Model, b: Model)
 	return pa ~= nil and pb ~= nil and not pa.Neutral and pa.Team == pb.Team
 end
 
--- Every living enemy character overlapping `box` ({ Size, Offset }) relative to the attacker's root.
-function Hitbox.Query(attacker: Model, box): { Model }
+-- Every living enemy character overlapping `box` ({ Size, Offset }) relative to the attacker's root,
+-- or to `origin` when given (e.g. where a dash is expected to be).
+function Hitbox.Query(attacker: Model, box, origin: CFrame?): { Model }
 	local root = attacker:FindFirstChild("HumanoidRootPart")
 	if not root then
 		return {}
@@ -27,7 +28,7 @@ function Hitbox.Query(attacker: Model, box): { Model }
 	params.FilterDescendantsInstances = { attacker }
 
 	local found, list = {}, {}
-	for _, part in workspace:GetPartBoundsInBox(root.CFrame * CFrame.new(box.Offset), box.Size, params) do
+	for _, part in workspace:GetPartBoundsInBox((origin or root.CFrame) * CFrame.new(box.Offset), box.Size, params) do
 		local char = characterOf(part)
 		if char and not found[char] and not sameTeam(attacker, char) then
 			found[char] = true
