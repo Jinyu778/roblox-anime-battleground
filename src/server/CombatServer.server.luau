@@ -10,6 +10,7 @@ local StateHandler = require(Modules.StateHandler)
 local HitboxService = require(Modules.HitboxService)
 local Moves = require(Modules.Moves)
 local Ragdoll = require(script.Parent.Ragdoll)
+local MalevolentShrine = require(script.Parent.MalevolentShrine)
 
 local now = StateHandler.Now
 
@@ -526,20 +527,31 @@ local function onJabHit(char: Model, target: any)
 	if typeof(target) ~= "Instance" or not target:IsA("Model") or target == char then
 		return
 	end
+	local function reject(reason: string)
+		if Config.Server.DebugMoves then
+			print(string.format("[Jab] %s -> %s rejected: %s", char.Name, target.Name, reason))
+		end
+	end
 	local dash = dashes[char]
 	if not dash or dash.direction ~= "Front" or dash.jabbed or StateHandler.IsLocked(char) then
-		return
+		return reject("no active front dash")
 	end
 	if now() - dash.start > dash.duration + Config.Server.HitGrace then
-		return
+		return reject("too late in the dash")
 	end
 	local hum = target:FindFirstChildOfClass("Humanoid")
 	if not hum or hum.Health <= 0 or HitboxService.SameTeam(char, target) or StateHandler.IsInvulnerable(target) then
-		return
+		return reject("target dead, teammate or in i-frames")
 	end
+	-- Your client moves your own character, so the server's copy of you trails the dash. Allow the distance the
+	-- dash can cover in HitGrace seconds on top of the normal reach, or fast dashes get their hits thrown away.
+	local reach = Config.Server.MaxHitDistance + Config.Dash.FrontStartSpeed * Config.Server.HitGrace
 	local distance = HitboxService.Distance(char, target)
-	if distance > Config.Server.MaxHitDistance or not HitboxService.LineOfSight(char, target) then
-		return
+	if distance > reach then
+		return reject(string.format("too far (%.1f > %.1f studs)", distance, reach))
+	end
+	if not HitboxService.LineOfSight(char, target) then
+		return reject("no line of sight")
 	end
 
 	dash.jabbed = true
@@ -610,6 +622,11 @@ Input.OnServerEvent:Connect(function(player: Player, action: any, arg: any)
 		onDash(char, arg)
 	elseif action == "JabHit" then
 		onJabHit(char, arg)
+	elseif action == "Skill" and arg == "MalevolentShrine" then
+		if Config.Server.DebugMoves then
+			print("[Shrine] server got the skill input from " .. player.Name)
+		end
+		MalevolentShrine.Cast(char) -- validates state, cooldown and one-at-a-time itself
 	end
 end)
 
@@ -712,6 +729,7 @@ local passed, failure = pcall(function()
 	StateHandler.SelfTest()
 	HitboxService.SelfTest()
 	Ragdoll.SelfTest()
+	MalevolentShrine.SelfTest()
 	selfTest()
 end)
 if passed then
@@ -719,4 +737,5 @@ if passed then
 else
 	warn("[CombatServer] SELF-TEST FAILED: " .. tostring(failure))
 end
+MalevolentShrine.Init(Effects)
 StateHandler.Start()

@@ -29,6 +29,7 @@ Config.Effects = {
 		GuardBreak = Color3.fromRGB(255, 140, 0),
 		Critical = Color3.fromRGB(255, 80, 80),
 		BlackFlash = Color3.fromRGB(120, 0, 0),
+		Shrine = Color3.fromRGB(170, 0, 0),
 	},
 }
 
@@ -211,7 +212,7 @@ Config.WallCombo = {
 }
 
 Config.Hitbox = {
-	Debug = true, -- draw each hitbox query as a red box
+	Debug = false, -- draw each hitbox query as a red box
 	DebugTime = 0.15, -- seconds a debug box stays
 	DebugTransparency = 0.7,
 	VFXFolderName = "CombatVFX", -- workspace folder for effects; hitboxes and line-of-sight ignore it
@@ -245,6 +246,52 @@ Config.Poses = {
 	BlockIdle = { RightArm = { 100, 35, 0 }, LeftArm = { 100, -35, 0 } }, -- TUNE crossed guard
 	HitReaction = { Torso = { 20, 0, 0 }, RightArm = { 25, 0, 0 }, LeftArm = { 25, 0, 0 } }, -- TUNE
 	Stunned = { Torso = { 15, 0, 8 }, RightArm = { 10, 0, 15 }, LeftArm = { 10, 0, -15 } }, -- TUNE
+	MalevolentShrine = { RightArm = { 95, -25, 0 }, LeftArm = { 95, 25, 0 }, Torso = { -5, 0, 0 } }, -- TUNE hands raised to cast
+}
+
+-- Malevolent Shrine: press Key; the shrine rises behind you and slashes fill an area for Duration seconds.
+Config.MalevolentShrine = {
+	Key = Enum.KeyCode.One,
+	-- Looked up by name in ServerStorage, ReplicatedStorage and Workspace (case, spaces and underscores ignored).
+	ModelName = "sukunago", -- the shrine model
+	EffectName = "slash sukuna", -- the slash effect; its horizontal size becomes the attack radius
+	Cooldown = 10, -- TUNE seconds, starts when you cast
+	CastTime = 1.5, -- TUNE you are locked this long after pressing the key
+	SoundDelay = 1.5, -- seconds after the key press before the activation sound plays and the domain starts rising
+	RiseTime = 2.0, -- TUNE seconds the domain takes to rise; the slashes, damage and slash sound start when it's up
+	BehindDistance = 12, -- TUNE studs behind you the shrine appears
+	ModelYawOffset = 0, -- TUNE degrees; set 180 if the shrine's front faces the wrong way
+	Duration = 15, -- seconds the attack lasts, counted from when the slashes begin (after the rise)
+	TickInterval = 0.1, -- seconds between damage ticks
+	DamagePerTick = 1, -- HP per tick: 1 every 0.1s = 10 per second, 150 over 15 seconds
+	FlashEvery = 0.5, -- TUNE seconds between the red hit flashes on a target (every tick would flicker)
+	-- The three Sound objects you put in the shrine (or slash) folder, by name. Empty = take that folder's Sounds
+	-- in A-to-Z name order: 1st plays when you press the key, 2nd while the shrine rises, 3rd loops until it ends.
+	SoundNames = {
+		Cast = "Sukuna - Domain Expansion, Malevolent Shrine", -- on the key press
+		Rise = "Jujutsu JJK - Sukuna Malevolent Shrine Activation", -- after SoundDelay, while the domain rises
+		Loop = "malevolent shrine slashes (short)", -- loops while the slashes and damage run, stops when it ends
+	},
+	Radius = 0, -- studs; 0 = taken from the slash effect's size
+	EffectScale = 1, -- TUNE scales the slash effect (and so the radius)
+	FallbackRadius = 40, -- TUNE used when the effect is missing or has no size
+	HeightLimit = 30, -- TUNE studs above/below the area center that still count
+	FadeTime = 1.0, -- TUNE shrine sinks and slashes stop
+	EmitInterval = 0.5, -- TUNE burst-style particle emitters fire this often
+	EmitCount = 10, -- TUNE particles per burst (an "EmitCount" attribute on an emitter overrides it)
+	ShakeRange = 60, -- TUNE players this close feel the camera shake when the shrine finishes rising
+	ShakeIntensity = 0.5, -- TUNE
+	ShakeTime = 0.4, -- TUNE
+	DebugRadius = false, -- draw a ring showing the damage area
+	-- An effect narrower than ScatterBelow studs is one slash, not an area: copies of it are scattered at random
+	-- spots inside the radius instead (radius then = Radius, or FallbackRadius when Radius is 0).
+	ScatterBelow = 8, -- TUNE studs
+	ScatterInterval = 0.15, -- TUNE seconds between scattered slashes
+	ScatterLifetime = 0.8, -- TUNE seconds each scattered slash stays
+	-- Delete every Script, LocalScript and ModuleScript from the cloned shrine and effect. Free Toolbox models often
+	-- carry scripts that load code from outside asset ids; the shrine and effect only need to be visual.
+	-- Turn off only if your effect needs its own scripts to animate.
+	StripScripts = true,
 }
 
 -- Sound ids ("rbxassetid://..."). Empty = silent. Use audio you own or that is public/free to use.
@@ -256,6 +303,8 @@ Config.Sounds = {
 	HeavyHit = "", -- 4th M1, uppercut, downslam, wall combo
 	BlockHit = "", -- blocked / perfect blocked
 	EvasiveSound = "", -- ragdoll cancel
+	ShrineRise = "", -- shrine rising
+	ShrineSlash = "", -- slashes begin
 }
 
 Config.SoundSettings = {
@@ -284,6 +333,7 @@ Config.Animations = {
 	BlockIdle = "rbxassetid://0", -- Replace with your own uploaded animation ID
 	HitReaction = "rbxassetid://0", -- Replace with your own uploaded animation ID
 	Stunned = "rbxassetid://0", -- Replace with your own uploaded animation ID
+	MalevolentShrine = "rbxassetid://0", -- Replace with your own uploaded animation ID
 }
 
 return Config

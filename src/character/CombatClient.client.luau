@@ -372,6 +372,28 @@ local function onDash()
 	end)
 end
 
+-- Malevolent Shrine: the server validates state and cooldown; this only skips a press that can't work.
+local shrine = Config.MalevolentShrine
+ContextActionService:BindAction("CombatShrine", function(_, state)
+	if state ~= Enum.UserInputState.Begin then
+		return Enum.ContextActionResult.Pass
+	end
+	local wait = StateHandler.Number(char, "ShrineReadyTime") - StateHandler.Now()
+	local blocked = if wait > 0
+		then string.format("on cooldown for %.0f more seconds", wait)
+		elseif StateHandler.Is(char, "Blocking") then "blocking"
+		elseif not StateHandler.CanAct(char) then "can't act right now"
+		else nil
+	if Config.Server.DebugMoves then
+		print("[Shrine] key pressed: " .. (blocked or "sending to the server"))
+	end
+	if not blocked then
+		Input:FireServer("Skill", "MalevolentShrine")
+		AnimationController.Play(char, "MalevolentShrine", shrine.CastTime)
+	end
+	return Enum.ContextActionResult.Pass
+end, false, shrine.Key)
+
 ContextActionService:BindAction("CombatDash", function(_, state)
 	if state == Enum.UserInputState.Begin then
 		onDash()
@@ -494,6 +516,102 @@ local function shake(intensity: number?, duration: number?)
 	end)
 end
 
+-- Shrine visuals ------------------------------------------------------------
+-- The server parents the shrine and slash effect into the VFX folder with attributes; every client animates them.
+
+local function riseShrine(model: Model)
+	local final = model:GetAttribute("RiseTo") :: CFrame
+	local riseTime = model:GetAttribute("RiseTime") :: number
+	local startedAt = model:GetAttribute("RiseStart") :: number
+	local from = model:GetPivot() -- buried
+	play3D("ShrineRise", model:FindFirstChildWhichIsA("BasePart", true), 1)
+	local connection: RBXScriptConnection
+	connection = RunService.RenderStepped:Connect(function()
+		if not model.Parent then
+			connection:Disconnect()
+			return
+		end
+		local alpha = math.clamp((StateHandler.Now() - startedAt) / riseTime, 0, 1)
+		model:PivotTo(from:Lerp(final, 1 - (1 - alpha) ^ 2)) -- ease out
+		if alpha >= 1 then
+			connection:Disconnect()
+			if (root.Position - final.Position).Magnitude <= shrine.ShakeRange then
+				shake(shrine.ShakeIntensity, shrine.ShakeTime)
+			end
+		end
+	end)
+end
+
+local function sinkShrine(model: Model)
+	local fade = model:GetAttribute("FadeTime") :: number
+	local depth = model:GetAttribute("Depth") :: number
+	local from = model:GetPivot()
+	local startClock = os.clock()
+	local connection: RBXScriptConnection
+	connection = RunService.RenderStepped:Connect(function()
+		if not model.Parent then
+			connection:Disconnect()
+			return
+		end
+		local alpha = math.clamp((os.clock() - startClock) / fade, 0, 1)
+		model:PivotTo(from - Vector3.new(0, depth * alpha, 0))
+		if alpha >= 1 then
+			connection:Disconnect()
+		end
+	end)
+end
+
+-- Burst-style emitters (Rate 0) don't fire on their own, and Emit isn't replicated, so each client bursts them.
+local function emitSlashes(model: Model)
+	play3D("ShrineSlash", model:FindFirstChildWhichIsA("BasePart", true), 1)
+	task.spawn(function()
+		while model.Parent do
+			local interval = model:GetAttribute("SlashEmitInterval")
+			if type(interval) ~= "number" then
+				break -- the server cleared it: the attack is over
+			end
+			local count = model:GetAttribute("SlashEmitCount") :: number
+			for _, d in model:GetDescendants() do
+				if d:IsA("ParticleEmitter") and d.Rate == 0 then
+					local own = d:GetAttribute("EmitCount")
+					d:Emit(if type(own) == "number" then own else count)
+				end
+			end
+			task.wait(interval)
+		end
+	end)
+end
+
+local function onVFXChild(child: Instance)
+	if not child:IsA("Model") then
+		return
+	end
+	if child:GetAttribute("RiseTo") ~= nil then
+		riseShrine(child)
+		child:GetAttributeChangedSignal("SinkAt"):Connect(function()
+			sinkShrine(child)
+		end)
+	end
+	if child:GetAttribute("SlashEmitInterval") ~= nil then
+		emitSlashes(child)
+	else
+		-- a domain that rises first switches its slashes on afterwards
+		local connection: RBXScriptConnection
+		connection = child:GetAttributeChangedSignal("SlashEmitInterval"):Connect(function()
+			if child:GetAttribute("SlashEmitInterval") ~= nil then
+				connection:Disconnect()
+				emitSlashes(child)
+			end
+		end)
+	end
+end
+
+local vfxFolder = HitboxService.VFXFolder()
+vfxFolder.ChildAdded:Connect(onVFXChild)
+for _, child in vfxFolder:GetChildren() do
+	task.spawn(onVFXChild, child)
+end
+
 -- Heavy hits get the deep impact sound.
 local HEAVY_MOVES: { [string]: boolean } = { M1_4 = true, Uppercut = true, MiniUppercut = true, Downslam = true, WallCombo = true }
 
@@ -508,6 +626,11 @@ Effects.OnClientEvent:Connect(function(event: string, a: any, b: any, c: any, d:
 			else
 				play3D("Swing1", HitboxService.RootOf(other))
 			end
+		end
+	elseif event == "ShrineTick" then
+		local victim = a :: Model?
+		if victim and victim.Parent then
+			flash(victim, "Shrine") -- a small flash per damage tick, no shake or hit reaction
 		end
 	elseif event == "Evasive" then
 		-- white flash and chime so everyone sees the evasive is spent
