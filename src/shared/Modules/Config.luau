@@ -77,13 +77,14 @@ Config.Block = {
 
 Config.Dash = {
 	Debug = true, -- print direction, vector and distance per dash
-	-- Speed eases out (Quad Out) from Start to End over Duration, so a dash bursts then settles (~18 / ~10 studs).
-	FrontStartSpeed = 88, -- studs/s
-	FrontEndSpeed = 16,
-	FrontDuration = 0.45,
-	SideStartSpeed = 78, -- left, right and back
-	SideEndSpeed = 12,
-	SideDuration = 0.28,
+	-- Speed eases out (Quad Out) from Start to End over Duration, so a dash bursts then settles.
+	-- Distance = Duration * (Start + 2 * End) / 3: front ~28 studs (was ~18), side/back ~17 (was ~10).
+	FrontStartSpeed = 110, -- TUNE studs/s (was 88)
+	FrontEndSpeed = 30, -- TUNE (was 16)
+	FrontDuration = 0.5, -- TUNE (was 0.45)
+	SideStartSpeed = 95, -- TUNE left, right and back (was 78)
+	SideEndSpeed = 25, -- TUNE (was 12)
+	SideDuration = 0.35, -- TUNE (was 0.28)
 	FrontCooldown = 2, -- front dash has its own cooldown
 	SideCooldown = 2, -- left, right and back share this one
 	SideMinScale = 0.4, -- side/back speed multiplier at 0 health
