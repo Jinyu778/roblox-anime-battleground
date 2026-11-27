@@ -394,6 +394,42 @@ ContextActionService:BindAction("CombatShrine", function(_, state)
 	return Enum.ContextActionResult.Pass
 end, false, shrine.Key)
 
+-- World Cutting Slash: during the hand signs you turn with the camera; the server's lock (or a timeout) stops it.
+local worldSlash = Config.WorldSlash
+local aimUntil = 0
+local aimAutoRotate = true
+
+local function stopAim()
+	if aimUntil > 0 then
+		aimUntil = 0
+		hum.AutoRotate = aimAutoRotate
+	end
+end
+
+ContextActionService:BindAction("CombatWorldSlash", function(_, state)
+	local ready = StateHandler.Now() >= StateHandler.Number(char, "WorldSlashReadyTime")
+	if state == Enum.UserInputState.Begin and ready and StateHandler.CanAct(char) and not StateHandler.Is(char, "Blocking") then
+		Input:FireServer("Skill", "WorldSlash")
+		AnimationController.Play(char, "WorldSlashWindup", worldSlash.TrackTime + worldSlash.LockTime)
+		aimAutoRotate = hum.AutoRotate
+		hum.AutoRotate = false -- AutoRotate would turn the body toward held keys instead of the aim
+		aimUntil = os.clock() + worldSlash.TrackTime + worldSlash.LockTime
+	end
+	return Enum.ContextActionResult.Pass
+end, false, worldSlash.Key)
+
+RunService.RenderStepped:Connect(function()
+	if aimUntil == 0 then
+		return
+	end
+	if os.clock() >= aimUntil or StateHandler.IsLocked(char) then
+		stopAim()
+		return
+	end
+	local look = flat(workspace.CurrentCamera.CFrame.LookVector)
+	root.CFrame = CFrame.lookAt(root.Position, root.Position + look)
+end)
+
 ContextActionService:BindAction("CombatDash", function(_, state)
 	if state == Enum.UserInputState.Begin then
 		onDash()
@@ -612,8 +648,136 @@ for _, child in vfxFolder:GetChildren() do
 	task.spawn(onVFXChild, child)
 end
 
+-- World Cutting Slash visuals ---------------------------------------------------
+
+-- Red aura building on the caster through the windup.
+local function worldSlashWindup(caster: Model, duration: number)
+	play3D("WorldSlashChant", HitboxService.RootOf(caster), 1)
+	local aura = Instance.new("Highlight")
+	aura.FillColor = Color3.fromRGB(200, 0, 0)
+	aura.OutlineColor = Color3.new(0, 0, 0)
+	aura.FillTransparency = 1
+	aura.OutlineTransparency = 1
+	aura.Parent = caster
+	TweenService:Create(aura, TweenInfo.new(duration), { FillTransparency = 0.5, OutlineTransparency = 0 }):Play()
+	task.delay(duration, function()
+		aura:Destroy()
+	end)
+end
+
+-- Local shape of the # grid in its own frame (X right, Y up, facing -Z): per piece, its center and X/Y size.
+-- `count` lines spread evenly over `span` sit at (i/(count+1) - 0.5) * span, so they stick out past the outer
+-- crossings like a tic-tac-toe board. Each blade is BladeSegments pieces, thickest in the middle and pointed at both ends.
+local function gridShape(): { { offset: Vector3, size: Vector2 } }
+	local shape = {}
+	local w, h, t = worldSlash.GridWidth, worldSlash.GridHeight, worldSlash.LineThickness
+	local n = worldSlash.BladeSegments
+	local function blade(center: Vector3, along: Vector3, length: number)
+		local step = length / n
+		for i = 1, n do
+			local s = (i - 0.5) / n - 0.5 -- -0.5..0.5 along the blade
+			local thickness = math.max(0.1, t * math.cos(s * math.pi)) -- 1 in the middle, ~0 at the tips
+			local pieceLength = step * 1.05 -- slight overlap so the blade has no gaps
+			local size = if along.X ~= 0 then Vector2.new(pieceLength, thickness) else Vector2.new(thickness, pieceLength)
+			table.insert(shape, { offset = center + along * (s * length), size = size })
+		end
+	end
+	for i = 1, worldSlash.VerticalLines do
+		local x = (i / (worldSlash.VerticalLines + 1) - 0.5) * w
+		blade(Vector3.new(x, worldSlash.GridLift, 0), Vector3.yAxis, h)
+	end
+	for i = 1, worldSlash.HorizontalLines do
+		local y = (i / (worldSlash.HorizontalLines + 1) - 0.5) * h
+		blade(Vector3.new(0, worldSlash.GridLift + y, 0), Vector3.xAxis, w)
+	end
+	return shape
+end
+
+do
+	local shape = gridShape()
+	local n = worldSlash.BladeSegments
+	assert(#shape == (worldSlash.VerticalLines + worldSlash.HorizontalLines) * n, "BladeSegments pieces per line")
+	assert(shape[1].size.X < shape[math.ceil(n / 2)].size.X, "blades are pointed at the tips")
+	if worldSlash.VerticalLines >= 2 then
+		local x1, x2 = shape[1].offset.X, shape[n + 1].offset.X
+		assert(math.abs((x2 - x1) - worldSlash.GridWidth / (worldSlash.VerticalLines + 1)) < 1e-6, "vertical lines are evenly spaced")
+	end
+end
+
+-- The slash: a black # grid with a white outline that flies Length studs forward, then fades.
+local function worldSlashRelease(caster: Model, origin: Vector3, look: Vector3)
+	play3D("WorldSlashRelease", HitboxService.RootOf(caster), 1)
+	local facing = CFrame.lookAt(origin, origin + look) * CFrame.Angles(0, 0, math.rad(worldSlash.SlashTilt))
+	local function piece(color: Color3, size: Vector3, material: Enum.Material): Part
+		local part = Instance.new("Part")
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.CastShadow = false
+		part.Material = material
+		part.Color = color
+		part.Size = size
+		part.Parent = HitboxService.VFXFolder()
+		return part
+	end
+	local segments = {}
+	local edge = worldSlash.OutlineWidth * 2
+	for _, blade in gridShape() do
+		table.insert(segments, {
+			local_ = CFrame.new(blade.offset),
+			-- the outline is thinner in depth than the core, so it only shows around the black blade's edges
+			outline = piece(worldSlash.OutlineColor, Vector3.new(blade.size.X + edge, blade.size.Y + edge, 0.3), Enum.Material.Neon),
+			core = piece(Color3.new(0, 0, 0), Vector3.new(blade.size.X, blade.size.Y, 0.4), Enum.Material.SmoothPlastic),
+		})
+	end
+
+	local startClock = os.clock()
+	local connection: RBXScriptConnection
+	connection = RunService.RenderStepped:Connect(function()
+		local elapsed = os.clock() - startClock
+		local flown = math.clamp(elapsed / worldSlash.TravelTime, 0, 1)
+		local distance = worldSlash.Length * (1 - (1 - flown) ^ 2) -- fast out, easing at the end
+		local here = facing * CFrame.new(0, 0, -distance)
+		local fade = math.clamp((elapsed - worldSlash.TravelTime) / worldSlash.FadeTime, 0, 1)
+		for _, seg in segments do
+			local cf = here * seg.local_
+			seg.outline.CFrame = cf
+			seg.core.CFrame = cf
+			seg.outline.Transparency = fade
+			seg.core.Transparency = fade
+		end
+		if fade >= 1 then
+			connection:Disconnect()
+			for _, seg in segments do
+				seg.outline:Destroy()
+				seg.core:Destroy()
+			end
+		end
+	end)
+
+	-- black-and-white impact frame and shake for anyone close enough to feel it
+	if (root.Position - origin).Magnitude <= worldSlash.EffectRange then
+		local frame = Instance.new("ColorCorrectionEffect")
+		frame.Saturation = -1
+		frame.Contrast = 1.5
+		frame.Parent = game:GetService("Lighting")
+		task.delay(worldSlash.ImpactFrameTime, function()
+			frame:Destroy()
+		end)
+		shake(worldSlash.ShakeIntensity, worldSlash.ShakeTime)
+	end
+end
+
 -- Heavy hits get the deep impact sound.
-local HEAVY_MOVES: { [string]: boolean } = { M1_4 = true, Uppercut = true, MiniUppercut = true, Downslam = true, WallCombo = true }
+local HEAVY_MOVES: { [string]: boolean } = {
+	M1_4 = true,
+	Uppercut = true,
+	MiniUppercut = true,
+	Downslam = true,
+	WallCombo = true,
+	WorldSlash = true,
+}
 
 Effects.OnClientEvent:Connect(function(event: string, a: any, b: any, c: any, d: any)
 	if event == "Swing" or event == "Dash" then
@@ -626,6 +790,19 @@ Effects.OnClientEvent:Connect(function(event: string, a: any, b: any, c: any, d:
 			else
 				play3D("Swing1", HitboxService.RootOf(other))
 			end
+		end
+	elseif event == "WorldSlashWindup" then
+		if typeof(a) == "Instance" then
+			worldSlashWindup(a :: Model, b :: number)
+		end
+	elseif event == "WorldSlashLock" then
+		stopAim()
+	elseif event == "WorldSlashRelease" then
+		if typeof(a) == "Instance" and typeof(b) == "Vector3" and typeof(c) == "Vector3" then
+			if a == char then
+				AnimationController.Play(char, "WorldSlashRelease", worldSlash.Endlag)
+			end
+			worldSlashRelease(a :: Model, b, c)
 		end
 	elseif event == "ShrineTick" then
 		local victim = a :: Model?

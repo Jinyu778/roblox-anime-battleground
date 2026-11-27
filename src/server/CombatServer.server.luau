@@ -11,6 +11,7 @@ local HitboxService = require(Modules.HitboxService)
 local Moves = require(Modules.Moves)
 local Ragdoll = require(script.Parent.Ragdoll)
 local MalevolentShrine = require(script.Parent.MalevolentShrine)
+local WorldSlash = require(script.Parent.WorldSlash)
 
 local now = StateHandler.Now
 
@@ -201,6 +202,11 @@ local function resolveHit(attacker: Model, target: Model, move: Move): string
 		StateHandler.SetFlag(target, "Blocking", false)
 	end
 	hum:TakeDamage(damage)
+	-- hyperarmor (winding up a big move): the damage lands, but no stun, launch, ragdoll or knockback
+	if target:GetAttribute("Hyperarmor") == true then
+		Effects:FireAllClients("Hit", attacker, target, kind, move.Name)
+		return "Hit"
+	end
 
 	if move.RagdollTime then
 		-- upside-down tech: right after getting up, a downslam ignores the get-up immunity
@@ -627,6 +633,8 @@ Input.OnServerEvent:Connect(function(player: Player, action: any, arg: any)
 			print("[Shrine] server got the skill input from " .. player.Name)
 		end
 		MalevolentShrine.Cast(char) -- validates state, cooldown and one-at-a-time itself
+	elseif action == "Skill" and arg == "WorldSlash" then
+		WorldSlash.Cast(char) -- validates state and cooldown itself
 	end
 end)
 
@@ -730,6 +738,7 @@ local passed, failure = pcall(function()
 	HitboxService.SelfTest()
 	Ragdoll.SelfTest()
 	MalevolentShrine.SelfTest()
+	WorldSlash.SelfTest()
 	selfTest()
 end)
 if passed then
@@ -738,4 +747,5 @@ else
 	warn("[CombatServer] SELF-TEST FAILED: " .. tostring(failure))
 end
 MalevolentShrine.Init(Effects)
+WorldSlash.Init(Effects, resolveHit)
 StateHandler.Start()

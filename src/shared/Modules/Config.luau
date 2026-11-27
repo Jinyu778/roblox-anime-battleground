@@ -247,6 +247,8 @@ Config.Poses = {
 	HitReaction = { Torso = { 20, 0, 0 }, RightArm = { 25, 0, 0 }, LeftArm = { 25, 0, 0 } }, -- TUNE
 	Stunned = { Torso = { 15, 0, 8 }, RightArm = { 10, 0, 15 }, LeftArm = { 10, 0, -15 } }, -- TUNE
 	MalevolentShrine = { RightArm = { 95, -25, 0 }, LeftArm = { 95, 25, 0 }, Torso = { -5, 0, 0 } }, -- TUNE hands raised to cast
+	WorldSlashWindup = { RightArm = { 100, -40, 0 }, LeftArm = { 100, 40, 0 }, Torso = { -5, 0, 0 } }, -- TUNE hand signs
+	WorldSlashRelease = { RightArm = { 90, 25, 0 }, Torso = { -15, 40, 0 } }, -- TUNE the swing
 }
 
 -- Malevolent Shrine: press Key; the shrine rises behind you and slashes fill an area for Duration seconds.
@@ -294,6 +296,42 @@ Config.MalevolentShrine = {
 	StripScripts = true,
 }
 
+-- World Cutting Slash: hand signs while you turn with the camera, a short aim lock, then one long line slash
+-- that goes through blocks.
+Config.WorldSlash = {
+	Key = Enum.KeyCode.Two,
+	Cooldown = 1, -- TUNE seconds, from the key press (the move itself takes ~2s, so ~2s between casts)
+	TrackTime = 1.1, -- seconds of hand signs and aura; you turn with the camera
+	LockTime = 0.25, -- seconds the aim is locked while the slash forms
+	Endlag = 0.6, -- TUNE recovery after the release
+	Damage = 50, -- TUNE HP
+	Stun = 1.0, -- TUNE
+	Knockback = 65, -- TUNE studs/s away from you
+	Length = 500, -- TUNE studs the slash flies (hitbox and visual)
+	-- The slash is a # grid facing forward: VerticalLines up-down blades and HorizontalLines left-right blades,
+	-- each set evenly spaced. The grid is also the hitbox's width and height.
+	GridWidth = 169, -- TUNE studs across
+	GridHeight = 80, -- TUNE studs tall
+	GridLift = 37, -- TUNE studs the grid's center sits above the caster's root (37 puts its bottom near the feet)
+	VerticalLines = 6, -- TUNE more = smaller gaps
+	HorizontalLines = 4, -- TUNE more = smaller gaps
+	LineThickness = 1.5, -- TUNE studs at a blade's middle; blades taper to sharp points at both ends
+	BladeSegments = 16, -- pieces each blade is drawn with; more = smoother taper
+	OutlineColor = Color3.fromRGB(255, 255, 255), -- TUNE the glowing edge around the black blades
+	OutlineWidth = 0.5, -- TUNE studs of outline on each side
+	SlashTilt = 0, -- degrees the grid leans around its flight direction; 0 = upright
+	TravelTime = 1.0, -- TUNE seconds for the crescent to fly the full Length
+	FadeTime = 0.3, -- TUNE
+	Hyperarmor = true, -- hits during the windup still deal damage but don't interrupt it
+	-- Sound object played from the caster the moment the slash fires; found by name in ServerStorage,
+	-- ReplicatedStorage or Workspace (case, spaces and underscores ignored). "" = none.
+	FireSoundName = "sukuna_WCS_hit_sfx",
+	ImpactFrameTime = 0.08, -- seconds of black-and-white flash on release
+	EffectRange = 300, -- TUNE players this close get the impact frame and camera shake
+	ShakeIntensity = 0.6, -- TUNE
+	ShakeTime = 0.3, -- TUNE
+}
+
 -- Sound ids ("rbxassetid://..."). Empty = silent. Use audio you own or that is public/free to use.
 Config.Sounds = {
 	DashWhoosh = "", -- short air burst, every dash
@@ -305,6 +343,8 @@ Config.Sounds = {
 	EvasiveSound = "", -- ragdoll cancel
 	ShrineRise = "", -- shrine rising
 	ShrineSlash = "", -- slashes begin
+	WorldSlashChant = "", -- hand signs / chant during the windup
+	WorldSlashRelease = "", -- the slash tearing through
 }
 
 Config.SoundSettings = {
@@ -334,6 +374,8 @@ Config.Animations = {
 	HitReaction = "rbxassetid://0", -- Replace with your own uploaded animation ID
 	Stunned = "rbxassetid://0", -- Replace with your own uploaded animation ID
 	MalevolentShrine = "rbxassetid://0", -- Replace with your own uploaded animation ID
+	WorldSlashWindup = "rbxassetid://0", -- Replace with your own uploaded animation ID (hand signs)
+	WorldSlashRelease = "rbxassetid://0", -- Replace with your own uploaded animation ID (the swing)
 }
 
 return Config
