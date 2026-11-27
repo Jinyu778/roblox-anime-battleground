@@ -18,13 +18,12 @@ local FX = Instance.new("RemoteEvent")
 FX.Name = "FX"
 FX.Parent = ReplicatedStorage.Combat
 
-local DASH_MOVE = { Name = "DashHit", Percent = Config.Dash.HitPercent, Stun = Config.Dash.HitStun }
-local DASH_CLOSE_MOVE = {
-	Name = "DashHitClose",
-	Percent = Config.Dash.ClosePercent,
-	Stun = Config.Dash.HitStun,
-	Knockback = Config.Dash.CloseKnockback,
-}
+local JAB = Config.Moves.DashJab
+local JAB_CLOSE = table.clone(JAB)
+JAB_CLOSE.Percent = Config.DashJab.ClosePercent
+JAB_CLOSE.Knockback = if Config.DashJab.Knockback then Config.DashJab.CloseKnockback else nil
+local TRUE_DOWNSLAM = table.clone(Config.Moves.Downslam)
+TRUE_DOWNSLAM.NoCancel = true
 local WALL_MOVE = {
 	Name = "WallCombo",
 	Percent = Config.WallCombo.DamagePercent,
@@ -55,6 +54,13 @@ for _, kind in { "Front", "Back", "Side" } do
 end
 assert(Config.Dash.FrontDistance > Config.Dash.SideDistance, "front dash must travel further than side dash")
 assert(#Config.M1.Hits == 4, "M1 combo is a 4-hit string")
+assert(Config.Moves.Downslam.TrueAfterHits < #Config.M1.Hits, "true downslam must be reachable before the string ends")
+assert(Config.M1.Hits[1].Stun > Config.M1.Hits[1].Startup + Config.M1.Hits[1].Active + Config.M1.Hits[1].Endlag,
+	"M1 stun must outlast a swing or the string drops")
+assert(Config.DashJab.Window < Config.Dash.FrontDuration, "jab window must fit inside the front dash")
+assert(Config.Moves.MiniUppercut.Endlag <= Config.Moves.Uppercut.Endlag, "mini uppercut endlag must stay short for the dash tech")
+assert(TRUE_DOWNSLAM.NoCancel and not Config.Moves.Downslam.NoCancel, "only the true downslam blocks ragdoll cancel")
+assert(JAB_CLOSE.Percent > JAB.Percent and JAB.IsJab and not JAB.GuardBreak, "close jab hits harder and is never a guard breaker")
 
 -- Holds a world-space velocity on a character's root for `duration` seconds.
 -- Returns the attachment; destroying it removes the LinearVelocity too.
@@ -124,15 +130,27 @@ local function grantBuff(char: Model, d)
 	d.BuffUntil = t + Config.Block.BuffDuration
 end
 
-local function ragdoll(char: Model)
-	if StateMachine.Set(char, "Ragdolled", Config.Ragdoll.Duration) then
+local function ragdoll(char: Model, duration: number)
+	if StateMachine.Set(char, "Ragdolled", duration) then
 		Ragdoll.Start(char)
 	end
 end
 
 StateMachine.OnExit.Ragdolled = function(char, d)
 	Ragdoll.Stop(char)
-	d.StunImmuneUntil = now() + Config.Ragdoll.ImmunityAfter
+	d.NoCancel = false
+	d.GotUpAt = now()
+	d.StunImmuneUntil = d.GotUpAt + Config.Ragdoll.ImmunityAfter
+end
+
+-- A jab stun that runs out without a follow-up refreshing it grants a short immunity.
+StateMachine.OnExit.Stunned = function(_, d)
+	if d.JabStunned then
+		d.JabStunned = false
+		if Config.DashJab.ImmunityAfterEnabled then
+			d.StunImmuneUntil = now() + Config.DashJab.ImmunityAfter
+		end
+	end
 end
 
 -- The single place a hit is resolved: block, perfect block, guard, damage, stun, knockback, ragdoll, wall trigger.
@@ -154,7 +172,7 @@ local function ApplyHit(attacker: Model, target: Model, move)
 	local wasBlocking = td.State == "Blocking" and facing(target, attacker)
 
 	if wasBlocking and not guardBreak then
-		if move.IsM1 and t - td.BlockStart <= Config.Block.PerfectWindow then
+		if (move.IsM1 or move.PerfectBlockable) and t - td.BlockStart <= Config.Block.PerfectWindow then
 			grantBuff(target, td)
 			FX:FireAllClients("Hit", attacker, target, "PerfectBlock")
 			return "Blocked"
@@ -171,27 +189,48 @@ local function ApplyHit(attacker: Model, target: Model, move)
 		return "Blocked"
 	end
 
+	td.HitCount = if t - td.LastHitTime <= Config.Stun.DecayResetTime then td.HitCount + 1 else 1
+	td.LastHitTime = t
+
 	local damage = move.Damage or move.Percent * hum.MaxHealth
+	if Config.Combo.DamageDecayEnabled then
+		damage *= Config.Combo.DamageDecay ^ (td.HitCount - 1)
+	end
 	local kind = move.FXKind or (if wasBlocking then "GuardBreak" else "Hit")
-	if move.IsM1 and ad.Buff and t < ad.BuffUntil then
+	if (move.IsM1 or move.UsesBuff) and ad.Buff and t < ad.BuffUntil then
 		local blackFlash = ad.Buff == "BlackFlash"
-		damage *= if blackFlash then Config.Block.BlackFlashMultiplier else Config.Block.CritMultiplier
+		if blackFlash and move.BlackFlashPercent then
+			damage = move.BlackFlashPercent * hum.MaxHealth
+		else
+			damage *= if blackFlash then Config.Block.BlackFlashMultiplier else Config.Block.CritMultiplier
+		end
 		ad.BlackFlashChain = if blackFlash then ad.BlackFlashChain + 1 else 0
 		kind = ad.Buff
 		ad.Buff = nil
 	end
 	hum:TakeDamage(damage)
 
-	if td.State ~= "Ragdolled" and t >= td.StunImmuneUntil then
-		td.HitCount = if t - td.LastHitTime <= Config.Stun.DecayResetTime then td.HitCount + 1 else 1
-		td.LastHitTime = t
+	-- upside-down tech: a downslam right as the target gets up ignores their stun immunity
+	local freshTech = move.UpsideDownTech and t - td.GotUpAt <= move.UpsideDownWindow
+	local immune = t < td.StunImmuneUntil and not freshTech
+
+	if td.State ~= "Ragdolled" and not immune then
 		local stun = move.Stun * stunDecay(td.HitCount)
+		if move.IsJab and t - td.LastJabStunAt <= Config.DashJab.RepeatWindow then
+			stun *= Config.DashJab.RepeatScale -- anti stun-lock
+		end
 		if wasBlocking then
 			stun = math.max(stun, Config.Block.GuardBreakStun)
 		end
+		-- set before the state change so OnExit.Stunned sees whether the old stun was a jab's
+		td.JabStunned = move.IsJab == true
+		if move.IsJab then
+			td.LastJabStunAt = t
+		end
+		local state = if move.LaunchHeight then "Launched" else "Stunned"
 		-- never shorten a longer stun that is already running
-		if not (td.State == "Stunned" and td.Until > t + stun) then
-			StateMachine.Set(target, "Stunned", stun)
+		if not ((td.State == "Stunned" or td.State == "Launched") and td.Until > t + stun) then
+			StateMachine.Set(target, state, stun)
 		end
 	end
 
@@ -201,11 +240,23 @@ local function ApplyHit(attacker: Model, target: Model, move)
 		ad.WallTarget = target
 		ad.WallUntil = t + Config.WallCombo.Window
 	end
-	if move.Knockback or move.Launch then
-		push(target, away * (move.Knockback or 0) + Vector3.new(0, move.Launch or 0, 0), Config.Stun.KnockbackTime)
+	-- LaunchHeight: a short upward kick sized so gravity tops out at that height
+	local up = if move.LaunchHeight then math.sqrt(2 * workspace.Gravity * move.LaunchHeight) else move.Launch or 0
+	if move.Knockback or up ~= 0 then
+		local hold = if move.LaunchHeight then Config.Stun.LaunchHold else Config.Stun.KnockbackTime
+		push(target, away * (move.Knockback or 0) + Vector3.new(0, up, 0), hold)
 	end
-	if move.Ragdoll and hum.Health > 0 then
-		ragdoll(target)
+	if move.Ragdoll and hum.Health > 0 and not immune then
+		local duration = move.RagdollDuration or Config.Ragdoll.Duration
+		if move.LaunchHeight then
+			-- launched: the ragdoll lasts the flight (up and back down) plus RagdollDuration on the ground
+			duration += 2 * math.sqrt(2 * move.LaunchHeight / workspace.Gravity)
+		end
+		ragdoll(target, duration)
+		td.NoCancel = move.NoCancel == true
+	end
+	if move.Shockwave then
+		FX:FireAllClients("Shockwave", target)
 	end
 
 	FX:FireAllClients("Hit", attacker, target, kind)
@@ -257,6 +308,9 @@ local function runMove(char: Model, move)
 end
 
 local function finishMove(char: Model, d, move, token: number)
+	if move.DashCancel then
+		d.DashCancelToken = token -- a front dash may cut this endlag short (uppercut dash tech)
+	end
 	task.wait(move.Endlag)
 	if StateMachine.Valid(char, token) then
 		StateMachine.Set(char, "Idle")
@@ -265,16 +319,95 @@ local function finishMove(char: Model, d, move, token: number)
 	end
 end
 
-local function onM1(char: Model, d)
+local function grounded(char: Model)
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return false
+	end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { char }
+	return workspace:Raycast(root.Position, Vector3.new(0, -Config.Dash.GroundCheck, 0), params) ~= nil
+end
+
+local AIR_STATES = { [Enum.HumanoidStateType.Jumping] = true, [Enum.HumanoidStateType.Freefall] = true }
+
+-- Airborne by the replicated humanoid state, or by having no floor under the root.
+local function airborne(char: Model)
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	return hum ~= nil and (AIR_STATES[hum:GetState()] == true or not grounded(char))
+end
+
+-- Records when the server sees the character start a jump (the uppercut input window starts there).
+local function trackJumps(char: Model, d)
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if d.JumpConn or not hum then
+		return
+	end
+	d.JumpConn = hum.StateChanged:Connect(function(_, new)
+		if new == Enum.HumanoidStateType.Jumping then
+			d.JumpAt = now()
+		end
+	end)
+end
+
+-- fromCombo: the 4th hit with jump held (always the full uppercut). Otherwise a jab follow-up gets the mini.
+local function onUppercut(char: Model, d, t: number, fromCombo: boolean)
+	local mini = not fromCombo and t - d.LastJabAt <= Config.Moves.DashJab.Stun
+	local move = if mini then Config.Moves.MiniUppercut else Config.Moves.Uppercut
+	local landed, token = runMove(char, move)
+	d.UppercutReady = now() + (if landed then move.CooldownHit else move.CooldownMiss)
+	if not mini then
+		d.Combo = 0
+		d.M1Ready = now() + move.M1Lockout
+	end
+	if token then
+		finishMove(char, d, move, token)
+	end
+end
+
+local function onDownslam(char: Model, d)
+	local base = Config.Moves.Downslam
+	local move = if base.TrueDownslam and d.Combo >= base.TrueAfterHits then TRUE_DOWNSLAM else base
+	d.Combo = 0
+	d.DownslamReady = now() + move.Cooldown
+	d.M1Ready = now() + move.M1Lockout
+	local _, token = runMove(char, move)
+	if token then
+		finishMove(char, d, move, token)
+	end
+end
+
+local function onM1(char: Model, d, jumpHeld)
 	local t = now()
-	if d.State ~= "Idle" or t < d.M1Ready then
+	-- an M1 may cancel a side dash; front/back dashes have their own jab
+	local sideDash = d.State == "Dashing" and (d.DashDirection == "Left" or d.DashDirection == "Right")
+	if not (d.State == "Idle" or sideDash) or t < d.M1Ready then
 		return
 	end
 	-- delayed M1s keep the combo as long as the gap stays under ComboResetTime
 	if t - d.LastSwingEnd > Config.M1.ComboResetTime then
 		d.Combo = 0
 	end
-	d.Combo = d.Combo % #Config.M1.Hits + 1
+
+	-- context moves, validated from server-side state; jumpHeld is only which input the player chose
+	local inAir = airborne(char)
+	local nextIndex = d.Combo % #Config.M1.Hits + 1
+	if inAir then
+		if d.Combo == 0 and t - d.JumpAt <= Config.Moves.Uppercut.InputWindow then
+			-- jump then click right away, from neutral: uppercut opener
+			if t >= d.UppercutReady then
+				return onUppercut(char, d, t, false)
+			end
+		elseif t >= d.DownslamReady then
+			-- in the air after that window, or a fresh jump mid-combo: downslam
+			return onDownslam(char, d)
+		end
+	elseif jumpHeld == true and nextIndex == #Config.M1.Hits and t >= d.UppercutReady then
+		return onUppercut(char, d, t, true) -- holding jump turns the 4th hit into an uppercut
+	end
+
+	d.Combo = nextIndex
 	local index = d.Combo
 	local move = Config.M1.Hits[index]
 
@@ -317,17 +450,6 @@ local function onBlock(char: Model, d, holding)
 	end
 end
 
-local function grounded(char: Model)
-	local root = char:FindFirstChild("HumanoidRootPart")
-	if not root then
-		return false
-	end
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = { char }
-	return workspace:Raycast(root.Position, Vector3.new(0, -Config.Dash.GroundCheck, 0), params) ~= nil
-end
-
 local DASH_DIRECTIONS = { Front = true, Back = true, Left = true, Right = true }
 
 local function onDash(char: Model, d, direction, clientTime, clientYaw)
@@ -354,13 +476,14 @@ local function onDash(char: Model, d, direction, clientTime, clientYaw)
 
 	local wallTarget = d.WallTarget
 	local wallCombo = direction == "Front" and wallTarget ~= nil and start <= d.WallUntil and t >= d.WallReady
+	local dashCancel = direction == "Front" and d.DashCancelToken == d.Token -- uppercut dash tech
 	if d.State == "Ragdolled" then
-		-- ragdoll cancel: side or back only, and only on the ground
-		if direction == "Front" or not grounded(char) then
+		-- ragdoll cancel: side or back only, on the ground, and never out of a true downslam
+		if direction == "Front" or d.NoCancel or not grounded(char) then
 			return
 		end
-	elseif not (d.State == "Idle" or (wallCombo and d.State == "Attacking")) then
-		return -- Stunned covers "no dash during M1 stun"
+	elseif not (d.State == "Idle" or (d.State == "Attacking" and (wallCombo or dashCancel))) then
+		return -- Stunned and Launched cover "no dash while stunned or airborne-launched"
 	end
 
 	-- Facing = the yaw the client saw when Q was pressed. The replicated root rotation lags a camera turn,
@@ -382,6 +505,7 @@ local function onDash(char: Model, d, direction, clientTime, clientYaw)
 	if not token then
 		return
 	end
+	d.DashDirection = direction
 	d[readyKey] = start + (if isSide then Config.Dash.SideCooldown else Config.Dash.ForwardCooldown)
 	d.IFrameUntil = start + Config.Dash.IFrames
 
@@ -392,7 +516,7 @@ local function onDash(char: Model, d, direction, clientTime, clientYaw)
 		distance *= sideDashScale(hum.Health / hum.MaxHealth)
 	end
 	local travel = Config.Dash[kind .. "Duration"] - lag
-	local orbitTarget = if isSide then nearestEnemy(char, Config.Dash.OrbitRange) else nil
+	local orbitTarget = if isSide and Config.Dash.OrbitRange > 0 then nearestEnemy(char, Config.Dash.OrbitRange) else nil
 	if Config.Dash.Debug then
 		print(string.format("[Dash] %s dir=%s vector=%s distance=%.2f studs travel=%.3fs lag=%.3fs orbit=%s",
 			char.Name, direction, tostring(dirVector), distance, travel, lag, if orbitTarget then orbitTarget.Name else "none"))
@@ -401,7 +525,7 @@ local function onDash(char: Model, d, direction, clientTime, clientYaw)
 	local player = Players:GetPlayerFromCharacter(char)
 	if player then
 		-- the owner simulates its own character, so it applies the velocity; speed, time and target are decided here
-		FX:FireClient(player, "DashGo", dirVector, distance / travel, travel, orbitTarget)
+		FX:FireClient(player, "DashGo", dirVector, distance / travel, travel, orbitTarget, direction)
 		FX:FireClient(player, "Cooldown", readyKey, d[readyKey])
 	end
 	FX:FireAllClients("Dash", char, direction)
@@ -418,14 +542,32 @@ local function onDash(char: Model, d, direction, clientTime, clientYaw)
 
 	local hitSet = { [wallTarget or char] = true }
 	local stop = t + travel
+	local startPos, speed = root.Position, distance / travel
 	while StateMachine.Valid(char, token) and now() < stop do
-		if direction == "Front" and now() - start <= Config.Dash.HitWindow then
-			for _, target in Hitbox.Query(char, Config.Dash.Hitbox) do
+		if direction == "Front" and now() - start <= Config.DashJab.Window then
+			-- the owner moves its own character, so the server's copy lags behind the dash;
+			-- aim the jab where the dash should be by now along its starting direction
+			local along = dirVector * (speed * math.min(now() - t, travel))
+			local origin = CFrame.lookAt(startPos + along, startPos + along + dirVector)
+			for _, target in Hitbox.Query(char, Config.DashJab.Hitbox, origin) do
 				local tRoot = target:FindFirstChild("HumanoidRootPart")
 				if not hitSet[target] and tRoot then
 					hitSet[target] = true
-					local close = (tRoot.Position - root.Position).Magnitude <= Config.Dash.CloseRange
-					ApplyHit(char, target, if close then DASH_CLOSE_MOVE else DASH_MOVE)
+					local close = (tRoot.Position - root.Position).Magnitude <= Config.DashJab.CloseRange
+					local ok, result = pcall(ApplyHit, char, target, if close then JAB_CLOSE else JAB)
+					if not ok then
+						warn("[Combat] ApplyHit failed:", result)
+					elseif result then
+						-- the jab ends the dash: short recovery on hit, a punishable one when blocked
+						d.Combo = 0 -- follow-up M1s start at hit 1
+						if result == "Hit" then
+							d.LastJabAt = now()
+						end
+						local recovery = if result == "Hit" then Config.DashJab.HitRecovery else Config.DashJab.BlockedRecovery
+						StateMachine.Set(char, "Attacking", recovery)
+						FX:FireAllClients("Swing", char, JAB.Name)
+						break
+					end
 				end
 			end
 		end
@@ -460,8 +602,9 @@ Input.OnServerEvent:Connect(function(player, action, a, b, c)
 	if not d or d.State == "Dead" then
 		return
 	end
+	trackJumps(char, d)
 	if action == "M1" then
-		onM1(char, d)
+		onM1(char, d, a)
 	elseif action == "Block" then
 		onBlock(char, d, a)
 	elseif action == "Dash" then
@@ -473,7 +616,19 @@ Input.OnServerEvent:Connect(function(player, action, a, b, c)
 	end
 end)
 
+local function onCharacter(char: Model)
+	char:WaitForChild("Humanoid")
+	local d = StateMachine.Get(char)
+	if d then
+		trackJumps(char, d) -- before the first jump, so the first uppercut input counts
+	end
+end
+
 local function onPlayer(player: Player)
+	player.CharacterAdded:Connect(onCharacter)
+	if player.Character then
+		task.spawn(onCharacter, player.Character)
+	end
 	if Config.Block.GamepassId == 0 then
 		return
 	end

@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+local ContentProvider = game:GetService("ContentProvider")
 
 local Combat = ReplicatedStorage:WaitForChild("Combat")
 local Config = require(Combat:WaitForChild("Config"))
@@ -43,120 +44,18 @@ for _, v in { Vector3.new(0, 0, -1), Vector3.new(1, 0, 0), Vector3.new(-0.6, 0, 
 	assert(CFrame.fromEulerAnglesYXZ(0, yawOf(v), 0).LookVector:FuzzyEq(v, 1e-4), "yaw must round-trip")
 end
 
--- Code-driven poses (used when an animation id is empty) ------------------
+-- Code-driven fallback poses (separate module; delete it and these no-ops take over) --------
 
-local JOINT_NAMES = {
-	RightArm = { "RightShoulder", "Right Shoulder" }, -- R15, R6
-	LeftArm = { "LeftShoulder", "Left Shoulder" },
-	Torso = { "Waist", "RootJoint" },
-}
+local fallbackModule = script.Parent:WaitForChild("PoseFallback", 5) -- siblings may replicate a moment later
+local Fallback = if fallbackModule
+	then require(fallbackModule)
+	else { play = function() end, playFor = function() end, stop = function() end }
 
-local jointCache = setmetatable({}, { __mode = "k" }) -- [char] = { [joint] = Motor6D }
-local posing = {} -- [char] = { name, start, rise, hold, fall }
-
-local poseRotations = {} -- [poseName] = { [joint] = CFrame in torso space }
-for name, pose in Config.Poses do
-	poseRotations[name] = {}
-	for joint, deg in pose do
-		poseRotations[name][joint] = CFrame.fromEulerAnglesYXZ(math.rad(deg[1]), math.rad(deg[2]), math.rad(deg[3]))
-	end
-end
-
--- Newer avatars drive limbs with AnimationConstraints instead of Motor6Ds; both expose Transform.
-local function isJoint(instance: Instance)
-	return instance:IsA("Motor6D") or instance:IsA("AnimationConstraint")
-end
-
--- The joint's frame on its parent part (C0 for a Motor6D, Attachment0 for an AnimationConstraint).
-local function jointFrame(joint): CFrame
-	if joint:IsA("Motor6D") then
-		return joint.C0
-	end
-	return if joint.Attachment0 then joint.Attachment0.CFrame else CFrame.identity
-end
-
-local function joints(char: Model)
-	local cached = jointCache[char]
-	if cached then
-		return cached
-	end
-	cached = {}
-	for _, instance in char:GetDescendants() do
-		if isJoint(instance) and instance.Enabled then
-			for joint, names in JOINT_NAMES do
-				if table.find(names, instance.Name) then
-					cached[joint] = instance
-				end
-			end
-		end
-	end
-	jointCache[char] = cached
-	if Config.Client.DebugPoses then
-		local found = {}
-		for joint, instance in cached do
-			table.insert(found, joint .. "=" .. instance.ClassName)
-		end
-		print("[Pose]", char.Name, if #found > 0 then table.concat(found, " ") else "NO JOINTS FOUND")
-	end
-	return cached
-end
-
--- Blends the pose over whatever the Animator wrote this frame, so walk/idle still shows underneath.
-local function applyPose(char: Model, name: string, weight: number)
-	for joint, rotation in poseRotations[name] do
-		local motor = joints(char)[joint]
-		if motor then
-			-- conjugate by the joint frame so the angles mean the same thing on R6 and R15
-			local c0 = jointFrame(motor).Rotation
-			motor.Transform = motor.Transform:Lerp(c0:Inverse() * rotation * c0, weight)
-		end
-	end
-end
-
--- rise = blend in, hold = full pose, fall = blend out (seconds). Replaces the character's previous pose.
-local function pose(char: Model, name: string, rise: number, hold: number, fall: number)
-	if poseRotations[name] then
-		posing[char] = { name = name, start = os.clock(), rise = rise, hold = hold, fall = fall }
-	end
-end
-
-local function poseFor(char: Model, name: string, duration: number)
-	local rise, fall = duration * Config.PoseTiming.Rise, duration * Config.PoseTiming.Fall
-	pose(char, name, rise, duration - rise - fall, fall)
-end
-
-local CANCEL_STATES = { Stunned = true, Ragdolled = true, Dead = true }
-
--- Stepped runs after the Animator has written its joints, so poses layer on top.
-RunService.Stepped:Connect(function()
-	local t = os.clock()
-	for char, p in posing do
-		local state = char:GetAttribute("CombatState")
-		local elapsed = t - p.start
-		local keepHit = p.name == "HitReaction" and state == "Stunned"
-		if not char.Parent or elapsed >= p.rise + p.hold + p.fall or (CANCEL_STATES[state] and not keepHit) then
-			posing[char] = nil
-		else
-			local weight = if elapsed < p.rise
-				then 1 - (1 - elapsed / p.rise) ^ 2 -- ease-out: snappy windup
-				elseif elapsed < p.rise + p.hold then 1
-				else 1 - (elapsed - p.rise - p.hold) / p.fall
-			applyPose(char, p.name, weight)
-		end
-	end
-	if Config.Animations.BlockIdle == "" then
-		for _, other in Players:GetPlayers() do
-			local c = other.Character
-			if c and c:GetAttribute("CombatState") == "Blocking" then
-				applyPose(c, "BlockIdle", 1)
-			end
-		end
-	end
-end)
+local CANCEL_STATES = { Stunned = true, Launched = true, Ragdolled = true, Dead = true }
 
 local function moveByName(name: string)
 	local index = tonumber(string.match(name, "^M1_(%d+)$"))
-	return if index then Config.M1.Hits[index] else Config.Skills[name]
+	return if index then Config.M1.Hits[index] else Config.Moves[name] or Config.Skills[name]
 end
 
 -- Animations -----------------------------------------------------------
@@ -164,6 +63,22 @@ end
 local tracks = {} -- [name] = AnimationTrack for the current character
 local current: AnimationTrack? = nil -- the playing action animation
 local lastPredictedDash = -math.huge
+
+local LOOPED = { BlockIdle = true, Stunned = true }
+local warned = {} -- one warning per animation name per session
+
+local function warnOnce(name: string, why: string)
+	if not warned[name] then
+		warned[name] = true
+		warn(string.format("[Anim] %s %s; using the code-driven fallback", name, why))
+	end
+end
+
+for name, id in Config.Animations do
+	if id == "" then
+		warnOnce(name, "has no id")
+	end
+end
 
 local function loadTracks(char: Model)
 	table.clear(tracks)
@@ -176,15 +91,31 @@ local function loadTracks(char: Model)
 			animation.AnimationId = id
 			local track = animator:LoadAnimation(animation)
 			track.Priority = Enum.AnimationPriority.Action
-			track.Looped = name == "BlockIdle"
+			track.Looped = LOOPED[name] == true
 			tracks[name] = track
-			if Config.Skills[name] or name:match("^M1_") then
+			if Config.Skills[name] or Config.Moves[name] or name:match("^M1_") then
 				track:GetMarkerReachedSignal("Hit"):Connect(function()
 					Input:FireServer("Marker")
 				end)
 			end
+			-- an id that doesn't load (wrong id, not owned by you/your group) drops back to the fallback
+			task.spawn(function()
+				ContentProvider:PreloadAsync({ animation }, function(_, status)
+					if status ~= Enum.AssetFetchStatus.Success and tracks[name] == track then
+						tracks[name] = nil
+						warnOnce(name, "failed to load (" .. status.Name .. ")")
+					end
+				end)
+			end)
 		end
 	end
+end
+
+Fallback.hasTrack = function(char: Model, name: string)
+	if char == player.Character then
+		return tracks[name] ~= nil
+	end
+	return Config.Animations[name] ~= "" -- other players' real animations replicate to us
 end
 
 local function stopAction()
@@ -202,9 +133,9 @@ local function playAction(name: string, duration: number, move: any?)
 	if not track then
 		local char = player.Character
 		if char and move then
-			pose(char, name, move.Startup, move.Active, move.Endlag)
+			Fallback.play(char, name, move.Startup, move.Active, move.Endlag)
 		elseif char then
-			poseFor(char, name, duration)
+			Fallback.playFor(char, name, duration)
 		end
 		return
 	end
@@ -394,7 +325,17 @@ local function stopDash()
 	end
 end
 
-local function runDash(direction: Vector3, speed: number, duration: number, target: Model?)
+-- Camera-relative world direction for a dash name, from a flat unit camera look.
+local function steerVector(name: string?, look: Vector3): Vector3?
+	local right = look:Cross(Vector3.yAxis)
+	return ({ Front = look, Back = -look, Left = -right, Right = right })[name]
+end
+
+assert(steerVector("Front", Vector3.new(0, 0, -1)) == Vector3.new(0, 0, -1), "front follows the camera")
+assert(steerVector("Right", Vector3.new(0, 0, -1)):FuzzyEq(Vector3.new(1, 0, 0), 1e-4), "right is the camera's right")
+assert(steerVector("Left", Vector3.new(1, 0, 0)):FuzzyEq(Vector3.new(0, 0, -1), 1e-4), "left turns with the camera")
+
+local function runDash(direction: Vector3, speed: number, duration: number, target: Model?, name: string?)
 	stopDash()
 	local char = player.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -410,7 +351,7 @@ local function runDash(direction: Vector3, speed: number, duration: number, targ
 	lv.MaxForce = math.huge
 	lv.VectorVelocity = direction * speed
 	lv.Parent = attachment
-	dashMover = { attachment = attachment, autoRotate = hum.AutoRotate }
+	dashMover = { attachment = attachment, autoRotate = hum.AutoRotate, side = name == "Left" or name == "Right" }
 	hum.AutoRotate = false
 
 	-- side dash with a target: travel along the circle around it, facing it, at the starting radius
@@ -434,6 +375,18 @@ local function runDash(direction: Vector3, speed: number, duration: number, targ
 			return
 		end
 		local face = lastDashLook
+		if Config.Dash.CameraSteer then
+			-- re-aim every frame so the slightest camera turn bends the dash
+			local look = camera.CFrame.LookVector * flat
+			if look.Magnitude > 1e-3 then
+				lastDashLook = look.Unit
+			end
+			face = lastDashLook
+			local steer = steerVector(name, lastDashLook)
+			if steer then
+				lv.VectorVelocity = steer * speed
+			end
+		end
 		if targetRoot and targetRoot.Parent then
 			local offset = (targetRoot.Position - root.Position) * flat
 			if offset.Magnitude > 1e-3 then
@@ -456,7 +409,7 @@ local function playDash(char: Model, direction: string)
 		playAction("Dash" .. direction, duration)
 		fovKick()
 	elseif Config.Animations["Dash" .. direction] == "" then
-		poseFor(char, "Dash" .. direction, duration) -- uploaded dash animations replicate on their own
+		Fallback.playFor(char, "Dash" .. direction, duration) -- uploaded dash animations replicate on their own
 	end
 	trail(char, duration)
 end
@@ -472,11 +425,48 @@ local function bind(name: string, onState: (Enum.UserInputState) -> (), ...)
 	end, false, ...)
 end
 
+-- Jump lock: no jumping while comboing, so holding jump only marks the 4th hit as an uppercut.
+-- A fresh jump press between swings still jumps, which is the downslam timing.
+local JUMP_KEYS = { [Enum.KeyCode.Space] = true, [Enum.KeyCode.ButtonA] = true }
+local jumpLockUntil = 0
+local jumpAllowUntil = 0
+
+local function jumpHeld(): boolean
+	return UserInputService:IsKeyDown(Enum.KeyCode.Space)
+		or UserInputService:IsGamepadButtonDown(Enum.UserInputType.Gamepad1, Enum.KeyCode.ButtonA)
+end
+
 bind("CombatM1", function(state)
 	if state == Enum.UserInputState.Begin then
-		Input:FireServer("M1")
+		jumpLockUntil = os.clock() + Config.M1.JumpLockTime
+		Input:FireServer("M1", jumpHeld())
 	end
 end, Enum.UserInputType.MouseButton1)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if gameProcessed or not JUMP_KEYS[input.KeyCode] or not hum or os.clock() >= jumpLockUntil then
+		return
+	end
+	if char:GetAttribute("CombatState") == "Idle" then
+		jumpAllowUntil = os.clock() + Config.M1.FreshJumpWindow
+		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+		hum:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+end)
+
+RunService.RenderStepped:Connect(function()
+	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		return
+	end
+	local t = os.clock()
+	local allow = t >= jumpLockUntil or t < jumpAllowUntil
+	if hum:GetStateEnabled(Enum.HumanoidStateType.Jumping) ~= allow then
+		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, allow)
+	end
+end)
 
 bind("CombatBlock", function(state)
 	if state == Enum.UserInputState.Begin then
@@ -537,13 +527,18 @@ local function onCharacter(char: Model)
 		local state = char:GetAttribute("CombatState")
 		if CANCEL_STATES[state] then
 			stopAction()
+		end
+		-- an M1 out of a side dash keeps the full dash distance; anything else (jab, stun, ragdoll, death) ends it
+		local m1OutOfSideDash = state == "Attacking" and dashMover ~= nil and dashMover.side
+		if state ~= "Dashing" and not m1OutOfSideDash then
 			stopDash()
 		end
-		if tracks.BlockIdle then
-			if state == "Blocking" then
-				tracks.BlockIdle:Play(Config.Client.AnimFade)
-			else
-				tracks.BlockIdle:Stop(Config.Client.AnimFade)
+		for name, loopState in { BlockIdle = "Blocking", Stunned = "Stunned" } do
+			local track = tracks[name]
+			if track and state == loopState then
+				track:Play(Config.Client.AnimFade)
+			elseif track then
+				track:Stop(Config.Client.AnimFade)
 			end
 		end
 	end)
@@ -641,19 +636,23 @@ end)
 
 -- Server events --------------------------------------------------------
 
-FX.OnClientEvent:Connect(function(event, a, b, c, d)
+FX.OnClientEvent:Connect(function(event, a, b, c, d, e)
 	local me = player.Character
 	if event == "DashGo" and typeof(a) == "Vector3" then
-		runDash(a, b, c, d) -- direction, speed, duration, orbit target (or nil)
+		runDash(a, b, c, d, e) -- direction, speed, duration, orbit target (or nil), direction name
 	elseif event == "Swing" and a then
 		local move = moveByName(b)
 		if not move then
 			return
 		end
 		if a == me then
-			playAction(b, move.Startup + move.Active + move.Endlag, move)
+			local total = move.Startup + move.Active + move.Endlag
+			if b == "M1_4" or b == "Uppercut" or b == "Downslam" then
+				jumpLockUntil = os.clock() + total -- the string ended: jumping frees up once this swing finishes
+			end
+			playAction(b, total, move)
 		elseif Config.Animations[b] == "" then
-			pose(a, b, move.Startup, move.Active, move.Endlag) -- uploaded animations replicate from the owner instead
+			Fallback.play(a, b, move.Startup, move.Active, move.Endlag) -- uploaded animations replicate from the owner instead
 		end
 	elseif event == "Dash" and a then
 		-- the owner already predicted it; play only if it didn't (e.g. a wall-combo dash out of endlag)
@@ -666,7 +665,7 @@ FX.OnClientEvent:Connect(function(event, a, b, c, d)
 			if target == me and tracks.HitReaction then
 				tracks.HitReaction:Play(Config.Client.AnimFade)
 			elseif Config.Animations.HitReaction == "" then
-				poseFor(target, "HitReaction", Config.PoseTiming.HitReactionTime)
+				Fallback.playFor(target, "HitReaction", Config.PoseTiming.HitReactionTime)
 			end
 		end
 		local root = target:FindFirstChild("HumanoidRootPart")
@@ -675,6 +674,13 @@ FX.OnClientEvent:Connect(function(event, a, b, c, d)
 		end
 		flash(target, kind)
 		if me and (attacker == me or target == me) then
+			shake()
+		end
+	elseif event == "Shockwave" and a then
+		dashBurst(a) -- ring, dust and floor rocks under the slammed target
+		local myRoot = me and me:FindFirstChild("HumanoidRootPart")
+		local targetRoot = a:FindFirstChild("HumanoidRootPart")
+		if myRoot and targetRoot and (myRoot.Position - targetRoot.Position).Magnitude <= Config.Client.ShockwaveShakeRange then
 			shake()
 		end
 	elseif event == "Cooldown" and readyAt[a] then
